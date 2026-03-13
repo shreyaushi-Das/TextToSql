@@ -19,21 +19,28 @@ def _infer_sqlite_type(series: pd.Series) -> str:
     return "TEXT"
 
 
-def process_csv(csv_source, db_path="database.db", table_name=None) -> dict:
-    # Read CSV — tries UTF-8 first, falls back to latin-1 (fixes Kaggle CSVs)
+def process_file(file_source, db_path="database.db", table_name=None) -> dict:
+    # detect extension
+    fname = file_source if isinstance(file_source, str) else getattr(file_source, "filename", "data")
+    ext = os.path.splitext(fname)[1].lower()
+
     try:
-        df = pd.read_csv(csv_source, encoding="utf-8")
-    except UnicodeDecodeError:
-        df = pd.read_csv(csv_source, encoding="latin-1")
+        if ext in [".xlsx", ".xls"]:
+            df = pd.read_excel(file_source)
+        else:
+            try:
+                df = pd.read_csv(file_source, encoding="utf-8")
+            except UnicodeDecodeError:
+                df = pd.read_csv(file_source, encoding="latin-1")
+    except Exception as e:
+        raise ValueError(f"Could not read file: {e}")
 
     if df.empty:
-        raise ValueError("The uploaded CSV file is empty.")
+        raise ValueError("The uploaded file is empty.")
 
     # Derive table name from filename
     if table_name is None:
-        fname = csv_source if isinstance(csv_source, str) else getattr(csv_source, "filename", "data")
         table_name = _sanitize_name(os.path.splitext(os.path.basename(fname))[0]) or "data"
-
     # Sanitize column names
     original_columns = list(df.columns)
     df.columns = [_sanitize_name(c) for c in df.columns]
@@ -66,5 +73,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python csv_to_sqlite.py yourfile.csv")
     else:
-        result = process_csv(sys.argv[1])
+        result = process_file(sys.argv[1])
         print(json.dumps(result, indent=2))
