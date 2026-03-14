@@ -4,10 +4,21 @@ load_dotenv()
 import streamlit as st
 import os
 import sqlite3
-import google.generativeai as genai
+import hashlib
+import traceback
+from google import genai
 from csv_to_sqlite import process_file
 
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+# ── Cache the client so it's created ONCE, not on every rerender ──────────────
+@st.cache_resource
+def get_client():
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        st.error("❌ GOOGLE_API_KEY not found in environment. Check your .env file.")
+        st.stop()
+    return genai.Client(api_key=api_key)
+
+client = get_client()
 
 
 def get_gemini_response(question, schema_string):
@@ -25,8 +36,10 @@ def get_gemini_response(question, schema_string):
     
     Question: {question}
     """
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[prompt]
+    )
     return response.text.strip()
 
 
@@ -40,6 +53,14 @@ def run_sql_query(sql, db_path):
     return rows, col_names
 
 
+def file_hash(uploaded_file):
+    """Hash file contents so we only reprocess when the file actually changes."""
+    uploaded_file.seek(0)
+    h = hashlib.md5(uploaded_file.read()).hexdigest()
+    uploaded_file.seek(0)
+    return h
+
+
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Text to SQL")
@@ -49,20 +70,19 @@ st.header("Conversational BI — Ask Your Data Anything")
 uploaded_file = st.file_uploader("Upload your CSV or Excel file", type=["csv", "xlsx", "xls"])
 
 if uploaded_file is not None:
-    # Process the file and store schema in session
-    if "schema_string" not in st.session_state or st.session_state.get("filename") != uploaded_file.name:
+    # Use file hash to detect actual file changes — not just filename
+    current_hash = file_hash(uploaded_file)
+
+    if st.session_state.get("file_hash") != current_hash:
         with st.spinner("Reading file and building database..."):
-            try:
-                uploaded_file.seek(0)
-                result = process_file(uploaded_file, db_path="database.db")
-                st.session_state["schema_string"] = result["schema_string"]
-                st.session_state["db_path"] = result["db_path"]
-                st.session_state["filename"] = uploaded_file.name
-                st.session_state["columns"] = result["original_columns"]
-                st.session_state["row_count"] = result["row_count"]
-            except Exception as e:
-                st.error(f"Could not process file: {e}")
-                st.stop()
+            # Show full error — don't silently swallow it
+            result = process_file(uploaded_file, db_path="database.db")
+            st.session_state["schema_string"] = result["schema_string"]
+            st.session_state["db_path"] = result["db_path"]
+            st.session_state["filename"] = uploaded_file.name
+            st.session_state["columns"] = result["original_columns"]
+            st.session_state["row_count"] = result["row_count"]
+            st.session_state["file_hash"] = current_hash
 
     # Show file info
     st.success(f"✅ Loaded **{uploaded_file.name}** — {st.session_state['row_count']} rows, {len(st.session_state['columns'])} columns")
@@ -94,4 +114,6 @@ if uploaded_file is not None:
                     st.info("Query returned no results.")
 
             except Exception as e:
-                st.error(f"Something went wrong: {e}")
+                # Show the FULL error — this is what was hiding your real problem
+                st.error(f"❌ Error: {e}")
+                st.code(traceback.format_exc(), language="python")
